@@ -22,10 +22,13 @@
  */
 
 #include "config.h"
+#include "inttypes.h"
 
 #include <assert.h>
 #include <stdbool.h>
 #include <stdio.h>
+static FILE *drag_log_file = NULL;
+static int last_dragging_state = 0; /* 0 for not dragging, 1 for dragging */
 
 #include "evdev-mt-touchpad.h"
 
@@ -1295,6 +1298,41 @@ tp_tap_handle_state(struct tp_dispatch *tp, uint64_t time)
 	 * exceed it. This prevents small motion events while we're waiting
 	 * on a decision if a tap is a tap.
 	 */
+
+	/* Log 1-finger drag state changes */
+	{
+	int is_dragging = 0; /* 0 for not dragging, 1 for dragging */
+
+	switch (tp->tap.state) {
+	case TAP_STATE_1FGTAP_DRAGGING:
+	case TAP_STATE_1FGTAP_DRAGGING_2:
+	case TAP_STATE_1FGTAP_DRAGGING_WAIT:
+	case TAP_STATE_1FGTAP_DRAGGING_OR_TAP:
+	case TAP_STATE_1FGTAP_DRAGGING_OR_DOUBLETAP:
+		is_dragging = 1;
+		break;
+	default:
+		is_dragging = 0;
+		break;
+	}
+
+	if (is_dragging != last_dragging_state) {
+		if (!drag_log_file) {
+		drag_log_file = fopen("/tmp/libinput-tap-drag.log", "a");
+		if (!drag_log_file) {
+			evdev_log_error(tp->device, "Failed to open log file /tmp/libinput-tap-drag.log\n");
+			return filter_motion;
+		}
+		}
+
+		fprintf(drag_log_file, "[%" PRIu64 "] %s\n",
+			time,
+			is_dragging ? "started drag" : "stopped drag");
+		fflush(drag_log_file);
+
+		last_dragging_state = is_dragging;
+	}
+	}
 	switch (tp->tap.state) {
 	case TAP_STATE_TOUCH:
 	case TAP_STATE_1FGTAP_TAPPED:
@@ -1589,6 +1627,10 @@ void
 tp_remove_tap(struct tp_dispatch *tp)
 {
 	libinput_timer_cancel(&tp->tap.timer);
+	if (drag_log_file) {
+		fclose(drag_log_file);
+		drag_log_file = NULL;
+	}
 }
 
 void
