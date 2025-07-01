@@ -71,7 +71,7 @@ static struct edge_motion_fsm fsm = {
 };
 
 /* Configuration constants */
-#define EDGE_MOTION_CONFIG_SPEED_MM_S 2.0          /* Motion speed in mm/s */
+#define EDGE_MOTION_CONFIG_SPEED_MM_S 25.0          /* Motion speed in mm/s */
 #define EDGE_MOTION_CONFIG_MIN_INTERVAL_US 8000     /* Min 8ms between motions */
 #define EDGE_MOTION_CONFIG_EDGE_THRESHOLD_MM 7.0    /* 7mm edge detection threshold */
 
@@ -167,26 +167,36 @@ calculate_motion_vector(uint32_t edge, double *dx, double *dy)
     }
 }
 
-/* Inject pointer motion with proper timing */
+/* Inject accumulated motion since last call */
 static void
-inject_continuous_motion(struct tp_dispatch *tp, uint64_t time)
+inject_accumulated_motion(struct tp_dispatch *tp, uint64_t time)
 {
     struct device_float_coords raw;
     struct normalized_coords delta;
-    uint64_t time_since_last = time - fsm.last_motion_time;
+    uint64_t time_since_last;
+    double accumulated_distance_mm;
 
-    /* Skip if too soon since last motion */
-    if (fsm.last_motion_time != 0 && time_since_last < EDGE_MOTION_CONFIG_MIN_INTERVAL_US) {
+    /* Initialize last motion time if first call */
+    if (fsm.last_motion_time == 0) {
+        fsm.last_motion_time = time;
+        return; /* Skip first call to establish baseline */
+    }
+
+    time_since_last = time - fsm.last_motion_time;
+
+    /* Always accumulate motion - no minimum interval check */
+    /* This ensures we never lose motion due to timing */
+    double time_factor = (double)time_since_last / 1000000.0; /* Convert to seconds */
+    accumulated_distance_mm = EDGE_MOTION_CONFIG_SPEED_MM_S * time_factor;
+
+    /* Only inject if we have meaningful motion to avoid micro-movements */
+    if (accumulated_distance_mm < 0.001) { /* Less than 0.001mm */
         return;
     }
 
-    /* Calculate distance based on actual time elapsed */
-    double time_factor = (double)time_since_last / 1000000.0; /* Convert to seconds */
-    double distance_mm = EDGE_MOTION_CONFIG_SPEED_MM_S * time_factor;
-
-    /* Convert to device coordinates */
-    raw.x = fsm.motion_dx * distance_mm * tp->accel.x_scale_coeff;
-    raw.y = fsm.motion_dy * distance_mm * tp->accel.y_scale_coeff;
+    /* Convert accumulated distance to device coordinates */
+    raw.x = fsm.motion_dx * accumulated_distance_mm * tp->accel.x_scale_coeff;
+    raw.y = fsm.motion_dy * accumulated_distance_mm * tp->accel.y_scale_coeff;
 
     /* Apply pointer acceleration filter */
     delta = filter_dispatch(tp->device->pointer.filter, &raw, tp, time);
@@ -200,10 +210,10 @@ inject_continuous_motion(struct tp_dispatch *tp, uint64_t time)
 
     /* Log motion details */
     char details[128];
-    snprintf(details, sizeof(details), "raw=(%.3f,%.3f) delta=(%.3f,%.3f) time_delta=%lums dist=%.2fmm",
+    snprintf(details, sizeof(details), "raw=(%.6f,%.6f) delta=(%.6f,%.6f) time_delta=%lums dist=%.6fmm",
              raw.x, raw.y, delta.x, delta.y,
-             (unsigned long)(time_since_last / 1000), distance_mm);
-    log_fsm_detailed("MOTION_INJECT", time, details);
+             (unsigned long)(time_since_last / 1000), accumulated_distance_mm);
+    log_fsm_detailed("MOTION_ACCUMULATED", time, details);
 }
 
 /* Enhanced edge detection */
@@ -386,7 +396,7 @@ tp_edge_motion_handle_drag_state(struct tp_dispatch *tp, uint64_t time)
 
     case STATE_DRAG_EDGE_CONTINUOUS:
         calculate_motion_vector(fsm.current_edge, &fsm.motion_dx, &fsm.motion_dy);
-        inject_continuous_motion(tp, time);
+        inject_accumulated_motion(tp, time);
         break;
 
     case STATE_DRAG_EDGE_EXIT:
