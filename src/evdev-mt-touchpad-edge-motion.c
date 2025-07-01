@@ -24,11 +24,49 @@
 #include "evdev-mt-touchpad-tds.h"
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 #include "inttypes.h"
+#include "evdev.h" /* For evdev_device_mm_to_units, evdev_log_* */
+#include "filter.h" /* For filter_dispatch */
+#include "libinput-private.h" /* For pointer_notify_motion, libinput_now */
 
 static FILE *drag_log_file = NULL;
 static int last_dragging_state = 0; /* 0 for not dragging, 1 for dragging */
 static uint32_t last_edge = EDGE_NONE; /* Last edge(s) detected */
+
+/* Inject pointer motion based on edge state */
+static void
+tp_inject_pointer_motion(struct tp_dispatch *tp, uint64_t time, double dx, double dy)
+{
+    struct device_float_coords raw;
+    struct normalized_coords delta;
+    const double speed_mm_s = 20.0; /* Fixed speed, adjustable */
+    uint64_t time_delta_us = ms2us(12); /* Assume 12ms frame interval */
+
+    /* Normalize direction vector */
+    double magnitude = sqrt(dx * dx + dy * dy);
+    if (magnitude > 0) {
+        dx /= magnitude;
+        dy /= magnitude;
+    } else {
+        dx = 0.0;
+        dy = 0.0; /* No motion if no direction */
+    }
+
+    /* Convert speed to device units */
+    raw.x = dx * speed_mm_s * time_delta_us / 1000000.0 * tp->accel.x_scale_coeff;
+    raw.y = dy * speed_mm_s * time_delta_us / 1000000.0 * tp->accel.y_scale_coeff;
+
+    /* Apply pointer acceleration filter */
+    delta = filter_dispatch(tp->device->pointer.filter, &raw, tp, time);
+
+    /* Post pointer motion event */
+    pointer_notify_motion(&tp->device->base, time, &delta, &raw);
+
+    /* Log for debugging */
+    evdev_log_debug(tp->device, "Injected pointer motion: dx=%f, dy=%f, speed=%f mm/s\n",
+                    dx, dy, speed_mm_s);
+}
 
 /* Extend edge detection to include all four edges if not initialized */
 static uint32_t
@@ -115,6 +153,7 @@ tp_edge_motion_handle_drag_state(struct tp_dispatch *tp, uint64_t time)
     uint32_t current_edge = EDGE_NONE;
     struct tp_touch *t;
     bool edge_changed = false;
+    double dx = 0.0, dy = 0.0;
 
     /* Check tap-and-drag state */
     switch (tp->tap.state) {
@@ -156,7 +195,7 @@ tp_edge_motion_handle_drag_state(struct tp_dispatch *tp, uint64_t time)
         edge_changed = true; /* Trigger edge/centered logging on drag state change */
     }
 
-    /* Handle edge-specific and centered logging */
+    /* Handle edge-specific and centered logging, and set motion direction */
     if (is_dragging) {
         if (current_edge != last_edge || edge_changed) {
             if (current_edge != EDGE_NONE) {
@@ -167,6 +206,21 @@ tp_edge_motion_handle_drag_state(struct tp_dispatch *tp, uint64_t time)
                 fprintf(drag_log_file, "centered\n");
             }
             fflush(drag_log_file);
+        }
+
+        /* Set dx, dy based on edge */
+        if (current_edge & EDGE_LEFT)
+            dx = -1.0;
+        else if (current_edge & EDGE_RIGHT)
+            dx = 1.0;
+        if (current_edge & EDGE_TOP)
+            dy = -1.0;
+        else if (current_edge & EDGE_BOTTOM)
+            dy = 1.0;
+
+        /* Inject pointer motion if dragging and direction is set */
+        if (dx != 0.0 || dy != 0.0) {
+            tp_inject_pointer_motion(tp, time, dx, dy);
         }
     } else if (last_edge != EDGE_NONE || edge_changed) {
         /* Log "centered" when drag stops and last position was on an edge */
