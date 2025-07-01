@@ -140,11 +140,13 @@ enum tp_tap_touch_state {
 	TAP_TOUCH_STATE_DEAD,		/**< exceeded motion/timeout */
 };
 
-/* For edge scrolling, so we only care about right and bottom */
+/* For edge scrolling and edge motion, include all four edges */
 enum tp_edge {
 	EDGE_NONE	= 0,
 	EDGE_RIGHT	= bit(0),
 	EDGE_BOTTOM	= bit(1),
+	EDGE_LEFT	= bit(2),
+	EDGE_TOP	= bit(3),
 };
 
 enum tp_edge_scroll_touch_state {
@@ -417,6 +419,8 @@ struct tp_dispatch {
 		enum libinput_config_scroll_method method;
 		int32_t right_edge;		/* in device coordinates */
 		int32_t bottom_edge;		/* in device coordinates */
+		int32_t left_edge;		/* in device coordinates */
+		int32_t upper_edge;		/* in device coordinates */
 		struct {
 			bool h, v;
 		} active;
