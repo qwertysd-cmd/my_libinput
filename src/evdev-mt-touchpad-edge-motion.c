@@ -21,223 +21,346 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+
+/*
+ * TOUCHPAD EDGE MOTION
+ * ====================
+ *
+ * This module implements automatic cursor motion when performing tap-and-drag
+ * operations near the edges of a touchpad. When a user starts dragging content
+ * and reaches the edge of the touchpad, the system automatically continues
+ * moving the cursor in that direction to allow selection/dragging of content
+ * that extends beyond the physical touchpad boundaries.
+ *
+ */
+
 #include "evdev-mt-touchpad-tds.h"
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
 #include "inttypes.h"
-#include "evdev.h" /* For evdev_device_mm_to_units, evdev_log_* */
-#include "filter.h" /* For filter_dispatch */
-#include "libinput-private.h" /* For pointer_notify_motion, libinput_now */
+#include "evdev.h"
+#include "filter.h"
+#include "libinput-private.h"
 
+void tp_edge_motion_init(struct tp_dispatch *tp);
+struct tp_dispatch;
+
+/*
 static FILE *drag_log_file = NULL;
-static int last_dragging_state = 0; /* 0 for not dragging, 1 for dragging */
-static uint32_t last_edge = EDGE_NONE; /* Last edge(s) detected */
+*/
 
-/* Inject pointer motion based on edge state */
-static void
-tp_inject_pointer_motion(struct tp_dispatch *tp, uint64_t time, double dx, double dy)
-{
-    struct device_float_coords raw;
-    struct normalized_coords delta;
-    const double speed_mm_s = 20.0; /* Fixed speed, adjustable */
-    uint64_t time_delta_us = ms2us(12); /* Assume 12ms frame interval */
+enum edge_motion_state {
+    STATE_IDLE,
+    STATE_DRAG_ACTIVE_CENTERED,
+    STATE_DRAG_EDGE_ENTRY,
+    STATE_DRAG_EDGE_CONTINUOUS,
+    STATE_DRAG_EDGE_EXIT
+};
 
-    /* Normalize direction vector */
-    double magnitude = sqrt(dx * dx + dy * dy);
-    if (magnitude > 0) {
-        dx /= magnitude;
-        dy /= magnitude;
-    } else {
-        dx = 0.0;
-        dy = 0.0; /* No motion if no direction */
+struct edge_motion_fsm {
+    enum edge_motion_state current_state;
+    enum edge_motion_state previous_state;
+    uint64_t state_entry_time;
+    uint64_t last_motion_time;
+    uint32_t current_edge;
+    uint32_t previous_edge;
+    double motion_dx;
+    double motion_dy;
+    bool is_dragging;
+    bool was_dragging;
+    uint64_t continuous_motion_count;
+    struct tp_dispatch *tp;
+    struct libinput_timer timer;
+};
+
+static struct edge_motion_fsm fsm = {
+    .current_state = STATE_IDLE,
+    .previous_state = STATE_IDLE,
+    .tp = NULL,
+};
+
+#define EDGE_MOTION_CONFIG_SPEED_MM_S 40.0
+#define EDGE_MOTION_CONFIG_MIN_INTERVAL_US 8000
+#define EDGE_MOTION_CONFIG_EDGE_THRESHOLD_MM 7.0
+
+static const char *
+state_to_string(enum edge_motion_state state) {
+    switch (state) {
+        case STATE_IDLE: return "IDLE";
+        case STATE_DRAG_ACTIVE_CENTERED: return "DRAG_ACTIVE_CENTERED";
+        case STATE_DRAG_EDGE_ENTRY: return "DRAG_EDGE_ENTRY";
+        case STATE_DRAG_EDGE_CONTINUOUS: return "DRAG_EDGE_CONTINUOUS";
+        case STATE_DRAG_EDGE_EXIT: return "DRAG_EDGE_EXIT";
+        default: return "UNKNOWN";
     }
-
-    /* Convert speed to device units */
-    raw.x = dx * speed_mm_s * time_delta_us / 1000000.0 * tp->accel.x_scale_coeff;
-    raw.y = dy * speed_mm_s * time_delta_us / 1000000.0 * tp->accel.y_scale_coeff;
-
-    /* Apply pointer acceleration filter */
-    delta = filter_dispatch(tp->device->pointer.filter, &raw, tp, time);
-
-    /* Post pointer motion event */
-    pointer_notify_motion(&tp->device->base, time, &delta, &raw);
-
-    /* Log for debugging */
-    evdev_log_debug(tp->device, "Injected pointer motion: dx=%f, dy=%f, speed=%f mm/s\n",
-                    dx, dy, speed_mm_s);
 }
 
-/* Extend edge detection to include all four edges if not initialized */
+static const char *
+edge_to_string(uint32_t edge) {
+    static char buffer[64];
+    buffer[0] = '\0';
+    if (edge == EDGE_NONE) return "NONE";
+    if (edge & EDGE_LEFT) strcat(buffer, "LEFT|");
+    if (edge & EDGE_RIGHT) strcat(buffer, "RIGHT|");
+    if (edge & EDGE_TOP) strcat(buffer, "TOP|");
+    if (edge & EDGE_BOTTOM) strcat(buffer, "BOTTOM|");
+    size_t len = strlen(buffer);
+    if (len > 0) buffer[len - 1] = '\0';
+    return buffer;
+}
+
+/*
+static void
+log_fsm_detailed(const char *event, uint64_t time, const char *details) {
+    if (!drag_log_file) return;
+    fprintf(drag_log_file, "[%lu] %s: %s->%s | drag=%s->%s | edge=%s->%s | motion=(%+.2f,%+.2f) | count=%lu | %s\n",
+            (unsigned long)(time / 1000), event, state_to_string(fsm.previous_state),
+            state_to_string(fsm.current_state), fsm.was_dragging ? "T" : "F", fsm.is_dragging ? "T" : "F",
+            edge_to_string(fsm.previous_edge), edge_to_string(fsm.current_edge), fsm.motion_dx, fsm.motion_dy,
+            (unsigned long)fsm.continuous_motion_count, details ? details : "");
+    fflush(drag_log_file);
+}
+*/
+
+static void
+calculate_motion_vector(uint32_t edge, double *dx, double *dy) {
+    *dx = 0.0; *dy = 0.0;
+    if (edge & EDGE_LEFT) *dx = -1.0;
+    else if (edge & EDGE_RIGHT) *dx = 1.0;
+    if (edge & EDGE_TOP) *dy = -1.0;
+    else if (edge & EDGE_BOTTOM) *dy = 1.0;
+    double mag = sqrt((*dx) * (*dx) + (*dy) * (*dy));
+    if (mag > 0) { *dx /= mag; *dy /= mag; }
+}
+
+static void
+inject_accumulated_motion(struct tp_dispatch *tp, uint64_t time) {
+    /* Initialize timing on first call */
+    if (fsm.last_motion_time == 0) {
+        fsm.last_motion_time = time;
+        return;
+    }
+
+    /* Calculate time delta since last motion event */
+    uint64_t time_since_last = time - fsm.last_motion_time;
+
+    /* Convert time delta to distance based on configured speed */
+    /* time_since_last is in microseconds, speed is mm/s */
+    double dist_mm = EDGE_MOTION_CONFIG_SPEED_MM_S * ((double)time_since_last / 1000000.0);
+
+    /* Skip micro-movements to avoid jitter */
+    if (dist_mm < 0.001) return;
+
+    /* Create raw motion coordinates in device units */
+    struct device_float_coords raw = {
+        .x = fsm.motion_dx * dist_mm * tp->accel.x_scale_coeff,
+        .y = fsm.motion_dy * dist_mm * tp->accel.y_scale_coeff
+    };
+
+    /* Apply pointer acceleration and user preferences */
+    struct normalized_coords delta = filter_dispatch(tp->device->pointer.filter, &raw, tp, time);
+
+    /* Send motion event to compositor */
+    pointer_notify_motion(&tp->device->base, time, &delta, &raw);
+
+    /* Update timing and statistics */
+    fsm.last_motion_time = time;
+    fsm.continuous_motion_count++;
+}
+
 static uint32_t
-tp_touch_get_extended_edge(const struct tp_dispatch *tp, const struct tp_touch *t)
-{
-    uint32_t edge = 0; /* Initialize to EDGE_NONE */
-    struct phys_coords mm = { 7.0, 7.0 }; /* 7mm threshold for edges */
-    struct device_coords edge_threshold;
+detect_touch_edge(const struct tp_dispatch *tp, const struct tp_touch *t) {
+    uint32_t edge = EDGE_NONE;
 
-    /* Convert 7mm to device coordinates */
-    edge_threshold = evdev_device_mm_to_units(tp->device, &mm);
+    /* Convert threshold from millimeters to device units */
+    struct phys_coords mm = {EDGE_MOTION_CONFIG_EDGE_THRESHOLD_MM, EDGE_MOTION_CONFIG_EDGE_THRESHOLD_MM};
+    struct device_coords threshold = evdev_device_mm_to_units(tp->device, &mm);
 
-    /* Check left edge */
-    if (tp->scroll.left_edge == 0) {
-        if (t->point.x < edge_threshold.x)
-            edge |= EDGE_LEFT;
-    } else {
-        if (t->point.x < tp->scroll.left_edge)
-            edge |= EDGE_LEFT;
-    }
-
-    /* Check top edge */
-    if (tp->scroll.upper_edge == 0) {
-        if (t->point.y < edge_threshold.y)
-            edge |= EDGE_TOP;
-    } else {
-        if (t->point.y < tp->scroll.upper_edge)
-            edge |= EDGE_TOP;
-    }
-
-    /* Check right edge */
-    if (tp->scroll.right_edge == 0) {
-        int32_t max_x = tp->device->abs.absinfo_x->maximum;
-        if (t->point.x > max_x - edge_threshold.x)
-            edge |= EDGE_RIGHT;
-    } else {
-        if (t->point.x > tp->scroll.right_edge)
-            edge |= EDGE_RIGHT;
-    }
-
-    /* Check bottom edge */
-    if (tp->scroll.bottom_edge == 0) {
-        int32_t max_y = tp->device->abs.absinfo_y->maximum;
-        if (t->point.y > max_y - edge_threshold.y)
-            edge |= EDGE_BOTTOM;
-    } else {
-        if (t->point.y > tp->scroll.bottom_edge)
-            edge |= EDGE_BOTTOM;
-    }
+    /* Check each edge boundary */
+    if (t->point.x < threshold.x)
+        edge |= EDGE_LEFT;
+    if (t->point.x > tp->device->abs.absinfo_x->maximum - threshold.x)
+        edge |= EDGE_RIGHT;
+    if (t->point.y < threshold.y)
+        edge |= EDGE_TOP;
+    if (t->point.y > tp->device->abs.absinfo_y->maximum - threshold.y)
+        edge |= EDGE_BOTTOM;
 
     return edge;
 }
 
-/* Convert edge flags to string for logging */
-static const char *
-edge_to_string(uint32_t edge)
-{
-    switch (edge) {
-    case EDGE_LEFT:
-        return "left";
-    case EDGE_RIGHT:
-        return "right";
-    case EDGE_TOP:
-        return "top";
-    case EDGE_BOTTOM:
-        return "bottom";
-    case EDGE_LEFT | EDGE_TOP:
-        return "top left";
-    case EDGE_LEFT | EDGE_BOTTOM:
-        return "bottom left";
-    case EDGE_RIGHT | EDGE_TOP:
-        return "top right";
-    case EDGE_RIGHT | EDGE_BOTTOM:
-        return "bottom right";
-    default:
-        return "none";
+static enum edge_motion_state
+calculate_next_state(bool is_dragging, uint32_t edge, enum edge_motion_state current) {
+    /* If not dragging, always return to idle state */
+    if (!is_dragging) return STATE_IDLE;
+
+    switch (current) {
+        /* From stable non-edge states, transition based on edge contact */
+        case STATE_IDLE:
+        case STATE_DRAG_ACTIVE_CENTERED:
+        case STATE_DRAG_EDGE_EXIT:
+            return (edge != EDGE_NONE) ? STATE_DRAG_EDGE_ENTRY : STATE_DRAG_ACTIVE_CENTERED;
+
+        /* From edge-active states, maintain edge state or exit */
+        case STATE_DRAG_EDGE_ENTRY:
+        case STATE_DRAG_EDGE_CONTINUOUS:
+            return (edge != EDGE_NONE) ? STATE_DRAG_EDGE_CONTINUOUS : STATE_DRAG_EDGE_EXIT;
     }
+
+    /* Defensive fallback for any unhandled states */
+    return STATE_IDLE;
 }
 
-int
-tp_edge_motion_handle_drag_state(struct tp_dispatch *tp, uint64_t time)
-{
-    int is_dragging = 0; /* 0 for not dragging, 1 for dragging */
-    uint32_t current_edge = EDGE_NONE;
-    struct tp_touch *t;
-    bool edge_changed = false;
-    double dx = 0.0, dy = 0.0;
+static void
+tp_edge_motion_handle_timeout(uint64_t now, void *data) {
+    struct edge_motion_fsm *fsm_ptr = data;
 
-    /* Check tap-and-drag state */
-    switch (tp->tap.state) {
-    case TAP_STATE_1FGTAP_DRAGGING:
-    case TAP_STATE_1FGTAP_DRAGGING_2:
-    case TAP_STATE_1FGTAP_DRAGGING_WAIT:
-    case TAP_STATE_1FGTAP_DRAGGING_OR_TAP:
-    case TAP_STATE_1FGTAP_DRAGGING_OR_DOUBLETAP:
-        is_dragging = 1;
-        break;
-    default:
-        is_dragging = 0;
-        break;
+    if (fsm_ptr->current_state != STATE_DRAG_EDGE_ENTRY &&
+        fsm_ptr->current_state != STATE_DRAG_EDGE_CONTINUOUS) {
+        return;  /* Timer should have been cancelled, but be defensive */
     }
 
-    /* Find the first active touch for edge detection */
-    tp_for_each_touch(tp, t) {
-        if (t->state == TOUCH_NONE || t->state == TOUCH_HOVERING || t->palm.state != PALM_NONE)
-            continue;
-        current_edge = tp_touch_get_extended_edge(tp, t);
-        break; /* Use the first valid touch */
-    }
+    /* Generate motion event based on current motion parameters */
+    inject_accumulated_motion(fsm_ptr->tp, now);
 
-    /* Open log file if not already open */
-    if (!drag_log_file) {
-        drag_log_file = fopen("/tmp/libinput-tap-drag.log", "a");
-        if (!drag_log_file) {
-            evdev_log_error(tp->device, "Failed to open log file /tmp/libinput-tap-drag.log\n");
-            return is_dragging;
-        }
-    }
-
-    /* Handle drag state changes */
-    if (is_dragging != last_dragging_state) {
-        fprintf(drag_log_file, "%s\n",
-                is_dragging ? "started drag" : "stopped drag");
-        fflush(drag_log_file);
-        last_dragging_state = is_dragging;
-        edge_changed = true; /* Trigger edge/centered logging on drag state change */
-    }
-
-    /* Handle edge-specific and centered logging, and set motion direction */
-    if (is_dragging) {
-        if (current_edge != last_edge || edge_changed) {
-            if (current_edge != EDGE_NONE) {
-                /* Log "moving [edge(s)]" if on an edge */
-                fprintf(drag_log_file, "moving %s\n", edge_to_string(current_edge));
-            } else {
-                /* Log "centered" if not on an edge */
-                fprintf(drag_log_file, "centered\n");
-            }
-            fflush(drag_log_file);
-        }
-
-        /* Set dx, dy based on edge */
-        if (current_edge & EDGE_LEFT)
-            dx = -1.0;
-        else if (current_edge & EDGE_RIGHT)
-            dx = 1.0;
-        if (current_edge & EDGE_TOP)
-            dy = -1.0;
-        else if (current_edge & EDGE_BOTTOM)
-            dy = 1.0;
-
-        /* Inject pointer motion if dragging and direction is set */
-        if (dx != 0.0 || dy != 0.0) {
-            tp_inject_pointer_motion(tp, time, dx, dy);
-        }
-    } else if (last_edge != EDGE_NONE || edge_changed) {
-        /* Log "centered" when drag stops and last position was on an edge */
-        fprintf(drag_log_file, "centered\n");
-        fflush(drag_log_file);
-    }
-
-    last_edge = current_edge;
-
-    return is_dragging;
+    /* Schedule next motion event */
+    libinput_timer_set(&fsm_ptr->timer, now + EDGE_MOTION_CONFIG_MIN_INTERVAL_US);
 }
 
 void
-tp_edge_motion_cleanup(void)
-{
+tp_edge_motion_init(struct tp_dispatch *tp) {
+    if (fsm.tp) return;
+    memset(&fsm, 0, sizeof(fsm));
+    fsm.current_state = STATE_IDLE;
+    fsm.tp = tp;
+    libinput_timer_init(&fsm.timer, tp_libinput_context(tp), "edge drag motion",
+                        tp_edge_motion_handle_timeout, &fsm);
+}
+
+void
+tp_edge_motion_cleanup(void) {
+
+    /*
     if (drag_log_file) {
+        log_fsm_detailed("CLEANUP", 0, "Shutting down FSM");
         fclose(drag_log_file);
         drag_log_file = NULL;
     }
+    */
+
+    /* Clean up timer resources if the FSM was initialized with a touchpad */
+    if (fsm.tp) {
+        libinput_timer_destroy(&fsm.timer);
+    }
+
+    /* Reset the entire FSM structure to zero */
+    memset(&fsm, 0, sizeof(fsm));
+
+    fsm.current_state = STATE_IDLE;
+}
+
+int
+tp_edge_motion_handle_drag_state(struct tp_dispatch *tp, uint64_t time) {
+    /* Initialize the FSM if this is the first call */
+    if (!fsm.tp)
+        tp_edge_motion_init(tp);
+
+    /*
+     * Determine if a drag operation is currently active by checking the tap FSM state
+     */
+    bool drag_active = false;
+    switch (tp->tap.state) {
+        case TAP_STATE_1FGTAP_DRAGGING:
+        case TAP_STATE_1FGTAP_DRAGGING_2:
+        case TAP_STATE_1FGTAP_DRAGGING_WAIT:
+        case TAP_STATE_1FGTAP_DRAGGING_OR_TAP:
+        case TAP_STATE_1FGTAP_DRAGGING_OR_DOUBLETAP:
+            drag_active = true;
+            break;
+        default:
+            drag_active = false;
+    }
+
+    /*
+     * Only check for edge detection when drag is active redundant checks
+     */
+    uint32_t detected_edge = EDGE_NONE;
+    struct tp_touch *t;
+    if (drag_active) {
+        /* Iterate through all active touches to find edge contact */
+        tp_for_each_touch(tp, t) {
+            /* Only consider touches that are actually in contact with the surface */
+            if (t->state != TOUCH_NONE && t->state != TOUCH_HOVERING) {
+                detected_edge = detect_touch_edge(tp, t);
+                break; /* Only need to find the first active touch at an edge */
+            }
+        }
+    }
+
+    /*
+    if (!drag_log_file) {
+        drag_log_file = fopen("/tmp/libinput-tap-drag-enhanced.log", "a");
+        if(drag_log_file) {
+            fprintf(drag_log_file, "\n=== NEW SESSION ===\n");
+            fflush(drag_log_file);
+        }
+    }
+    */
+
+    /* Update FSM state variables with current conditions */
+    fsm.previous_state = fsm.current_state;
+    fsm.current_edge = detected_edge;
+    fsm.is_dragging = drag_active;
+
+    /* Calculate the next state based on current drag status and edge detection */
+    enum edge_motion_state next_state = calculate_next_state(drag_active, detected_edge, fsm.current_state);
+
+    /* Handle state transitions */
+    if (next_state != fsm.current_state) {
+        fsm.current_state = next_state;
+        fsm.state_entry_time = time;
+
+        /* Reset continuous motion counter when leaving continuous motion state */
+        if (fsm.current_state != STATE_DRAG_EDGE_CONTINUOUS)
+            fsm.continuous_motion_count = 0;
+
+        //log_fsm_detailed("STATE_TRANSITION", time, "");
+    }
+
+    /* Handle state-specific actions */
+    switch (fsm.current_state) {
+        case STATE_IDLE:
+            /* No drag active - cancel any pending timers */
+            libinput_timer_cancel(&fsm.timer);
+            break;
+
+        case STATE_DRAG_ACTIVE_CENTERED:
+            /* Drag is active but not at edge - stop generated motion */
+            libinput_timer_cancel(&fsm.timer);
+            break;
+
+        case STATE_DRAG_EDGE_EXIT:
+            /* Touch has moved away from edge - stop generated motion */
+            libinput_timer_cancel(&fsm.timer);
+            break;
+
+        case STATE_DRAG_EDGE_ENTRY:
+            /* Touch has just reached an edge - start generated motion */
+            calculate_motion_vector(fsm.current_edge, &fsm.motion_dx, &fsm.motion_dy);
+            fsm.last_motion_time = time;
+            tp_edge_motion_handle_timeout(time, &fsm); /* Start the timer-based motion loop */
+            break;
+
+        case STATE_DRAG_EDGE_CONTINUOUS:
+            /* Continuing motion at edge - update motion vector */
+            calculate_motion_vector(fsm.current_edge, &fsm.motion_dx, &fsm.motion_dy);
+            break;
+    }
+
+    /*
+     * Return whether generated motion should be active
+     * Returns 1 (true) when in edge motion states, 0 (false) for idle or centered states
+     */
+    return (fsm.current_state != STATE_DRAG_ACTIVE_CENTERED && fsm.current_state != STATE_IDLE);
 }
