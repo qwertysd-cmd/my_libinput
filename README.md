@@ -1,6 +1,29 @@
-libinput
-========
+my_libinput
+===========
 
+This is an independent clone of libinput that implements my desired features which are not present in the upstream version.
+
+Current Additional Features
+---------------------------
+- **Variable Speed Edge Motion**: Currently supports edge motion with variable speed for tap and drag operations only (not click and drag)
+
+I also plan on adding more of my personally desired features.
+
+Building the Clone
+------------------
+The build instructions are identical to the upstream libinput, except you should clone this repository instead: 
+```bash
+git clone https://github.com/qwertysd-cmd/my_libinput/
+```
+
+Why is it a clone and not a fork?
+---------------------------------
+Because the devs made it clear that they will not implement edge motion [here](https://gitlab.freedesktop.org/libinput/libinput/-/issues/131) 
+and additionally, my future plans deviate from what libinput is actually meant to do.
+
+It is currently on par with version 1.28.1. I plan on making my additional features work with future versions as well.
+
+---
 libinput is a library that provides a full input stack for display servers
 and other applications that need to handle input devices provided by the
 kernel.
