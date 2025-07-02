@@ -24,6 +24,9 @@ and additionally, my future plans deviate from what libinput is actually meant t
 It is currently on libinput version 1.28.1. I plan on making my additional features work with future versions as well.
 
 ---
+libinput readme
+---------------
+
 libinput is a library that provides a full input stack for display servers
 and other applications that need to handle input devices provided by the
 kernel.
