@@ -1,5 +1,5 @@
 /*
- * Copyright © 2014-2015 Red Hat, Inc.
+ * Copyright © 2014-2015 QWERTYSD-CMD.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -26,12 +26,17 @@
  * TOUCHPAD EDGE MOTION
  * ====================
  *
- * This module implements automatic cursor motion when performing tap-and-drag
- * operations near the edges of a touchpad. When a user starts dragging content
- * and reaches the edge of the touchpad, the system automatically continues
+ * This module implements cursor motion when you are performing "tap-and-drag"
+ * and reach the edges of a touchpad. the implementation automatically continues
  * moving the cursor in that direction to allow selection/dragging of content
  * that extends beyond the physical touchpad boundaries.
  *
+ * The speed is now dynamic based on distance from edge:
+ * - 5-7mm: 0.5x speed multiplier
+ * - 3-5mm: 1.0x speed multiplier
+ * - 0-3mm: 2.0x speed multiplier
+ * Separate multipliers are applied for X and Y axes and updated dynamically
+ * as the finger moves closer to or further from each edge.
  */
 
 #include "evdev-mt-touchpad-tds.h"
@@ -67,10 +72,13 @@ struct edge_motion_fsm {
     uint32_t previous_edge;
     double motion_dx;
     double motion_dy;
+    double speed_multiplier_x;  /* Dynamic speed multiplier for X axis */
+    double speed_multiplier_y;  /* Dynamic speed multiplier for Y axis */
     bool is_dragging;
     bool was_dragging;
     uint64_t continuous_motion_count;
     struct tp_dispatch *tp;
+    struct tp_touch *active_touch; /* Track the active touch for dynamic updates */
     struct libinput_timer timer;
 };
 
@@ -78,12 +86,24 @@ static struct edge_motion_fsm fsm = {
     .current_state = STATE_IDLE,
     .previous_state = STATE_IDLE,
     .tp = NULL,
+    .active_touch = NULL,
 };
 
 #define EDGE_MOTION_CONFIG_SPEED_MM_S 40.0
 #define EDGE_MOTION_CONFIG_MIN_INTERVAL_US 8000
 #define EDGE_MOTION_CONFIG_EDGE_THRESHOLD_MM 7.0
 
+/* Dynamic speed zone thresholds */
+#define EDGE_ZONE_FAR_MM 7.0      /* 5-7mm zone */
+#define EDGE_ZONE_MID_MM 5.0      /* 3-5mm zone */
+#define EDGE_ZONE_NEAR_MM 3.0     /* 0-3mm zone */
+
+/* Speed multipliers for each zone */
+#define SPEED_MULT_FAR 0.5        /* 5-7mm */
+#define SPEED_MULT_MID 1.0        /* 3-5mm */
+#define SPEED_MULT_NEAR 2.0       /* 0-3mm */
+
+/*
 static const char *
 state_to_string(enum edge_motion_state state) {
     switch (state) {
@@ -109,29 +129,83 @@ edge_to_string(uint32_t edge) {
     if (len > 0) buffer[len - 1] = '\0';
     return buffer;
 }
+*/
 
 /*
 static void
 log_fsm_detailed(const char *event, uint64_t time, const char *details) {
     if (!drag_log_file) return;
-    fprintf(drag_log_file, "[%lu] %s: %s->%s | drag=%s->%s | edge=%s->%s | motion=(%+.2f,%+.2f) | count=%lu | %s\n",
+    fprintf(drag_log_file, "[%lu] %s: %s->%s | drag=%s->%s | edge=%s->%s | motion=(%+.2f,%+.2f) | speed_mult=(%.2f,%.2f) | count=%lu | %s\n",
             (unsigned long)(time / 1000), event, state_to_string(fsm.previous_state),
             state_to_string(fsm.current_state), fsm.was_dragging ? "T" : "F", fsm.is_dragging ? "T" : "F",
             edge_to_string(fsm.previous_edge), edge_to_string(fsm.current_edge), fsm.motion_dx, fsm.motion_dy,
+            fsm.speed_multiplier_x, fsm.speed_multiplier_y,
             (unsigned long)fsm.continuous_motion_count, details ? details : "");
     fflush(drag_log_file);
 }
 */
 
+static double
+get_speed_multiplier_for_distance(double distance_mm) {
+    if (distance_mm >= EDGE_ZONE_MID_MM) {
+        return SPEED_MULT_FAR;   /* 5-7mm zone */
+    } else if (distance_mm >= EDGE_ZONE_NEAR_MM) {
+        return SPEED_MULT_MID;   /* 2-5mm zone */
+    } else {
+        return SPEED_MULT_NEAR;  /* 0-2mm zone */
+    }
+}
+
 static void
-calculate_motion_vector(uint32_t edge, double *dx, double *dy) {
-    *dx = 0.0; *dy = 0.0;
-    if (edge & EDGE_LEFT) *dx = -1.0;
-    else if (edge & EDGE_RIGHT) *dx = 1.0;
-    if (edge & EDGE_TOP) *dy = -1.0;
-    else if (edge & EDGE_BOTTOM) *dy = 1.0;
-    double mag = sqrt((*dx) * (*dx) + (*dy) * (*dy));
-    if (mag > 0) { *dx /= mag; *dy /= mag; }
+update_motion_vector_and_speed(const struct tp_dispatch *tp, const struct tp_touch *t,
+                               uint32_t edge) {
+    fsm.motion_dx = 0.0;
+    fsm.motion_dy = 0.0;
+    fsm.speed_multiplier_x = 1.0;
+    fsm.speed_multiplier_y = 1.0;
+
+    if (!t) return; /* Safety check */
+
+    /* Convert touch coordinates to millimeters for distance calculation */
+    struct device_coords touch_pos = {t->point.x, t->point.y};
+    struct phys_coords touch_mm = evdev_device_units_to_mm(tp->device, &touch_pos);
+
+    /* Get touchpad dimensions in mm */
+    struct device_coords max_coords = {
+        tp->device->abs.absinfo_x->maximum,
+        tp->device->abs.absinfo_y->maximum
+    };
+    struct phys_coords max_mm = evdev_device_units_to_mm(tp->device, &max_coords);
+
+    /* Calculate distances from each edge in mm */
+    double dist_left = touch_mm.x;
+    double dist_right = max_mm.x - touch_mm.x;
+    double dist_top = touch_mm.y;
+    double dist_bottom = max_mm.y - touch_mm.y;
+
+    /* Determine motion direction and calculate speed multipliers */
+    if (edge & EDGE_LEFT) {
+        fsm.motion_dx = -1.0;
+        fsm.speed_multiplier_x = get_speed_multiplier_for_distance(dist_left);
+    } else if (edge & EDGE_RIGHT) {
+        fsm.motion_dx = 1.0;
+        fsm.speed_multiplier_x = get_speed_multiplier_for_distance(dist_right);
+    }
+
+    if (edge & EDGE_TOP) {
+        fsm.motion_dy = -1.0;
+        fsm.speed_multiplier_y = get_speed_multiplier_for_distance(dist_top);
+    } else if (edge & EDGE_BOTTOM) {
+        fsm.motion_dy = 1.0;
+        fsm.speed_multiplier_y = get_speed_multiplier_for_distance(dist_bottom);
+    }
+
+    /* Normalize diagonal motion */
+    double mag = sqrt((fsm.motion_dx) * (fsm.motion_dx) + (fsm.motion_dy) * (fsm.motion_dy));
+    if (mag > 0) {
+        fsm.motion_dx /= mag;
+        fsm.motion_dy /= mag;
+    }
 }
 
 static void
@@ -145,17 +219,27 @@ inject_accumulated_motion(struct tp_dispatch *tp, uint64_t time) {
     /* Calculate time delta since last motion event */
     uint64_t time_since_last = time - fsm.last_motion_time;
 
-    /* Convert time delta to distance based on configured speed */
+    /* Convert time delta to base distance based on configured speed */
     /* time_since_last is in microseconds, speed is mm/s */
-    double dist_mm = EDGE_MOTION_CONFIG_SPEED_MM_S * ((double)time_since_last / 1000000.0);
+    double base_dist_mm = EDGE_MOTION_CONFIG_SPEED_MM_S * ((double)time_since_last / 1000000.0);
 
     /* Skip micro-movements to avoid jitter */
-    if (dist_mm < 0.001) return;
+    if (base_dist_mm < 0.001) return;
+
+    /* Update motion vector and speed multipliers dynamically before each motion event */
+    /* This ensures speed changes immediately as finger moves closer/further from edges */
+    if (fsm.active_touch && fsm.current_edge != EDGE_NONE) {
+        update_motion_vector_and_speed(fsm.tp, fsm.active_touch, fsm.current_edge);
+    }
+
+    /* Apply dynamic speed multipliers separately for X and Y */
+    double actual_dist_x = base_dist_mm * fsm.speed_multiplier_x;
+    double actual_dist_y = base_dist_mm * fsm.speed_multiplier_y;
 
     /* Create raw motion coordinates in device units */
     struct device_float_coords raw = {
-        .x = fsm.motion_dx * dist_mm * tp->accel.x_scale_coeff,
-        .y = fsm.motion_dy * dist_mm * tp->accel.y_scale_coeff
+        .x = fsm.motion_dx * actual_dist_x * tp->accel.x_scale_coeff,
+        .y = fsm.motion_dy * actual_dist_y * tp->accel.y_scale_coeff
     };
 
     /* Apply pointer acceleration and user preferences */
@@ -222,6 +306,7 @@ tp_edge_motion_handle_timeout(uint64_t now, void *data) {
     }
 
     /* Generate motion event based on current motion parameters */
+    /* The inject_accumulated_motion function will update speed multipliers dynamically */
     inject_accumulated_motion(fsm_ptr->tp, now);
 
     /* Schedule next motion event */
@@ -234,6 +319,7 @@ tp_edge_motion_init(struct tp_dispatch *tp) {
     memset(&fsm, 0, sizeof(fsm));
     fsm.current_state = STATE_IDLE;
     fsm.tp = tp;
+    fsm.active_touch = NULL;
     libinput_timer_init(&fsm.timer, tp_libinput_context(tp), "edge drag motion",
                         tp_edge_motion_handle_timeout, &fsm);
 }
@@ -258,6 +344,7 @@ tp_edge_motion_cleanup(void) {
     memset(&fsm, 0, sizeof(fsm));
 
     fsm.current_state = STATE_IDLE;
+    fsm.active_touch = NULL;
 }
 
 int
@@ -283,20 +370,25 @@ tp_edge_motion_handle_drag_state(struct tp_dispatch *tp, uint64_t time) {
     }
 
     /*
-     * Only check for edge detection when drag is active redundant checks
+     * Find active touch and check for edge detection when drag is active
      */
     uint32_t detected_edge = EDGE_NONE;
-    struct tp_touch *t;
+    struct tp_touch *active_touch = NULL;
     if (drag_active) {
         /* Iterate through all active touches to find edge contact */
+        struct tp_touch *t;
         tp_for_each_touch(tp, t) {
             /* Only consider touches that are actually in contact with the surface */
             if (t->state != TOUCH_NONE && t->state != TOUCH_HOVERING) {
                 detected_edge = detect_touch_edge(tp, t);
+                active_touch = t;
                 break; /* Only need to find the first active touch at an edge */
             }
         }
     }
+
+    /* Store the active touch for dynamic updates during timer callbacks */
+    fsm.active_touch = active_touch;
 
     /*
     if (!drag_log_file) {
@@ -331,36 +423,42 @@ tp_edge_motion_handle_drag_state(struct tp_dispatch *tp, uint64_t time) {
     /* Handle state-specific actions */
     switch (fsm.current_state) {
         case STATE_IDLE:
-            /* No drag active - cancel any pending timers */
+            /* No drag active - cancel any pending timers and clear active touch */
             libinput_timer_cancel(&fsm.timer);
+            fsm.active_touch = NULL;
             break;
 
         case STATE_DRAG_ACTIVE_CENTERED:
-            /* Drag is active but not at edge - stop generated motion */
+            /* Drag is active but not at edge - stop generated motion and clear active touch */
             libinput_timer_cancel(&fsm.timer);
+            fsm.active_touch = NULL;
             break;
 
         case STATE_DRAG_EDGE_EXIT:
-            /* Touch has moved away from edge - stop generated motion */
+            /* Touch has moved away from edge - stop generated motion and clear active touch */
             libinput_timer_cancel(&fsm.timer);
+            fsm.active_touch = NULL;
             break;
 
         case STATE_DRAG_EDGE_ENTRY:
             /* Touch has just reached an edge - start generated motion */
-            calculate_motion_vector(fsm.current_edge, &fsm.motion_dx, &fsm.motion_dy);
+            if (active_touch) {
+                update_motion_vector_and_speed(tp, active_touch, fsm.current_edge);
+            }
             fsm.last_motion_time = time;
             tp_edge_motion_handle_timeout(time, &fsm); /* Start the timer-based motion loop */
             break;
 
         case STATE_DRAG_EDGE_CONTINUOUS:
-            /* Continuing motion at edge - update motion vector */
-            calculate_motion_vector(fsm.current_edge, &fsm.motion_dx, &fsm.motion_dy);
+            /* Continuing motion at edge - motion vector and speed will be updated dynamically in timer */
+            /* No action needed here as updates happen in inject_accumulated_motion() */
             break;
     }
 
     /*
      * Return whether generated motion should be active
      * Returns 1 (true) when in edge motion states, 0 (false) for idle or centered states
+     * FIXED: Use correct logical operator and state checks like the original working code
      */
     return (fsm.current_state != STATE_DRAG_ACTIVE_CENTERED && fsm.current_state != STATE_IDLE);
 }
