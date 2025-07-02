@@ -5,9 +5,9 @@ This is an independent clone of libinput that implements my desired features whi
 
 Current Additional Features
 ---------------------------
-- **Variable Speed Edge Motion**: Currently supports edge motion with variable speed for tap and drag operations only (not click and drag)
+- **Variable Speed Edge Motion**: Currently supports edge motion with variable speed for tap and drag operations only (not click and drag). three speeds depending on how close you are to the trackpad edge.
 
-I also plan on adding more of my personally desired features.
+In the near future, I also plan on adding more features that I would personally like.
 
 Building the Clone
 ------------------
@@ -21,7 +21,7 @@ Why is it a clone and not a fork?
 Because the devs made it clear that they will not implement edge motion [here](https://gitlab.freedesktop.org/libinput/libinput/-/issues/131) 
 and additionally, my future plans deviate from what libinput is actually meant to do.
 
-It is currently on par with version 1.28.1. I plan on making my additional features work with future versions as well.
+It is currently on libinput version 1.28.1. I plan on making my additional features work with future versions as well.
 
 ---
 libinput is a library that provides a full input stack for display servers
