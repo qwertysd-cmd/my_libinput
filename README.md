@@ -6,8 +6,10 @@ This is an independent clone of libinput that implements my desired features whi
 Current Additional Features
 ---------------------------
 - **Variable Speed Edge Motion**: Currently supports edge motion with variable speed for tap and drag operations only (not click and drag). three speeds depending on how close you are to the trackpad edge.
+- **3 is 4**: 3 finger horizontal swipes are unchanged, but 3 finger vertical swipes are notified as 4 finger vertical swipes
 
-In the near future, I also plan on adding more features that I would personally like.
+
+If you only want the edge motion feature and none of my extras, clone from the edge-motion branch
 
 Building the Clone
 ------------------
@@ -19,9 +21,7 @@ git clone https://github.com/qwertysd-cmd/my_libinput/
 Why is it a clone and not a fork?
 ---------------------------------
 Because the devs made it clear that they will not implement edge motion [here](https://gitlab.freedesktop.org/libinput/libinput/-/issues/131) 
-and additionally, my future plans deviate from what libinput is actually meant to do.
-
-It is currently on libinput version 1.28.1. I plan on making my additional features work with future versions as well.
+and additionally, my future plans deviate heavily from what libinput is actually meant to do.
 
 ---
 libinput's readme
