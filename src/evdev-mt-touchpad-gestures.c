@@ -955,9 +955,18 @@ tp_gesture_handle_event_on_state_swipe(struct tp_dispatch *tp,
 	case GESTURE_EVENT_END:
 	case GESTURE_EVENT_CANCEL: {
 		bool cancelled = event == GESTURE_EVENT_CANCEL;
+		int finger_count = tp->gesture.finger_count;
+		/* Report 3-finger vertical swipe as 4-finger swipe */
+		if (tp->gesture.finger_count == 3) {
+			struct device_float_coords raw = tp_get_average_touches_delta(tp);
+			struct phys_coords delta_mm = tp_phys_delta(tp, raw);
+			if (fabs(delta_mm.y) > fabs(delta_mm.x) * 1.73) { /* 60-degree slope for vertical */
+				finger_count = 4;
+			}
+		}
 		gesture_notify_swipe_end(&tp->device->base,
 					 time,
-					 tp->gesture.finger_count,
+					 finger_count,
 					 cancelled);
 		libinput_timer_cancel(&tp->gesture.hold_timer);
 		tp->gesture.state = GESTURE_STATE_NONE;
@@ -1605,9 +1614,17 @@ tp_gesture_handle_state_swipe_start(struct tp_dispatch *tp, uint64_t time)
 
 	if (!normalized_is_zero(delta) || !device_float_is_zero(raw)) {
 		const struct normalized_coords zero = { 0.0, 0.0 };
+		int finger_count = tp->gesture.finger_count;
+		/* Report 3-finger vertical swipe as 4-finger swipe */
+		if (tp->gesture.finger_count == 3) {
+			struct phys_coords delta_mm = tp_phys_delta(tp, raw);
+			if (fabs(delta_mm.y) > fabs(delta_mm.x) * 1.73) { /* 60-degree slope for vertical */
+				finger_count = 4;
+			}
+		}
 		gesture_notify_swipe(&tp->device->base, time,
 				     LIBINPUT_EVENT_GESTURE_SWIPE_BEGIN,
-				     tp->gesture.finger_count,
+				     finger_count,
 				     &zero, &zero);
 		tp->gesture.state = GESTURE_STATE_SWIPE;
 	}
@@ -1623,10 +1640,18 @@ tp_gesture_handle_state_swipe(struct tp_dispatch *tp, uint64_t time)
 	delta = tp_filter_motion(tp, &raw, time);
 
 	if (!normalized_is_zero(delta) || !device_float_is_zero(raw)) {
+		int finger_count = tp->gesture.finger_count;
+		/* Report 3-finger vertical swipe as 4-finger swipe */
+		if (tp->gesture.finger_count == 3) {
+			struct phys_coords delta_mm = tp_phys_delta(tp, raw);
+			if (fabs(delta_mm.y) > fabs(delta_mm.x) * 1.73) { /* 60-degree slope for vertical */
+				finger_count = 4;
+			}
+		}
 		unaccel = tp_filter_motion_unaccelerated(tp, &raw, time);
 		gesture_notify_swipe(&tp->device->base, time,
 				     LIBINPUT_EVENT_GESTURE_SWIPE_UPDATE,
-				     tp->gesture.finger_count,
+				     finger_count,
 				     &delta, &unaccel);
 	}
 }
