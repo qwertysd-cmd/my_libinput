@@ -27,6 +27,10 @@
 #include <stdbool.h>
 
 #include "evdev-mt-touchpad.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
 
 enum gesture_cancelled {
 	END_GESTURE = 0,
@@ -111,6 +115,34 @@ gesture_event_to_str(enum gesture_event event)
 	}
 	return NULL;
 }
+/* Logging function to write swipe events to a file in /tmp */
+static void
+tp_log_swipe_event(struct tp_dispatch *tp, uint64_t time, const char *event_type, int finger_count, const struct normalized_coords *delta)
+{
+    FILE *log_file;
+    char *log_path = "/tmp/touchpad_swipe.log";
+
+    /* Determine swipe direction based on delta */
+    const char *direction;
+    if (fabs(delta->y) > fabs(delta->x) * 1.73) { /* 60-degree slope for vertical */
+        direction = delta->y > 0 ? "down" : "up";
+    } else {
+        direction = delta->x > 0 ? "right" : "left";
+    }
+
+    /* Open log file in append mode */
+    log_file = fopen(log_path, "a");
+    if (log_file == NULL) {
+        evdev_log_error(tp->device, "Failed to open log file %s\n", log_path);
+        return;
+    }
+
+    /* Write human-readable log entry with deltas */
+    fprintf(log_file, "%s: %d-finger swipe %s (delta x: %.2f, y: %.2f)\n",
+            event_type, finger_count, direction, delta->x, delta->y);
+    fclose(log_file);
+}
+
 
 static struct device_float_coords
 tp_get_touches_delta(struct tp_dispatch *tp, bool average)
@@ -1606,56 +1638,73 @@ tp_gesture_handle_state_scroll(struct tp_dispatch *tp, uint64_t time)
 static void
 tp_gesture_handle_state_swipe_start(struct tp_dispatch *tp, uint64_t time)
 {
-	struct device_float_coords raw;
-	struct normalized_coords delta;
+    struct device_float_coords raw;
+    struct normalized_coords delta;
+    int finger_count = tp->gesture.finger_count;
 
-	raw = tp_get_average_touches_delta(tp);
-	delta = tp_filter_motion(tp, &raw, time);
+    raw = tp_get_average_touches_delta(tp);
+    delta = tp_filter_motion(tp, &raw, time);
 
-	if (!normalized_is_zero(delta) || !device_float_is_zero(raw)) {
-		const struct normalized_coords zero = { 0.0, 0.0 };
-		int finger_count = tp->gesture.finger_count;
-		/* Report 3-finger vertical swipe as 4-finger swipe */
-		if (tp->gesture.finger_count == 3) {
-			struct phys_coords delta_mm = tp_phys_delta(tp, raw);
-			if (fabs(delta_mm.y) > fabs(delta_mm.x) * 1.73) { /* 60-degree slope for vertical */
-				finger_count = 4;
-			}
-		}
-		gesture_notify_swipe(&tp->device->base, time,
-				     LIBINPUT_EVENT_GESTURE_SWIPE_BEGIN,
-				     finger_count,
-				     &zero, &zero);
-		tp->gesture.state = GESTURE_STATE_SWIPE;
-	}
+    if (!normalized_is_zero(delta) || !device_float_is_zero(raw)) {
+        const struct normalized_coords zero = { 0.0, 0.0 };
+
+        /* For 4 physical fingers, log the event and do not notify */
+        if (tp->gesture.finger_count == 4) {
+            tp_log_swipe_event(tp, time, "SWIPE_BEGIN", finger_count, &delta);
+            tp->gesture.state = GESTURE_STATE_SWIPE;
+            return;
+        }
+
+        /* Handle 3-finger vertical swipes as 4-finger swipes */
+        if (tp->gesture.finger_count == 3) {
+            struct phys_coords delta_mm = tp_phys_delta(tp, raw);
+            if (fabs(delta_mm.y) > fabs(delta_mm.x) * 1.73) { /* 60-degree slope for vertical */
+                finger_count = 4;
+            }
+        }
+
+        /* Notify for non-4-finger swipes */
+        gesture_notify_swipe(&tp->device->base, time,
+                            LIBINPUT_EVENT_GESTURE_SWIPE_BEGIN,
+                            finger_count,
+                            &zero, &zero);
+        tp->gesture.state = GESTURE_STATE_SWIPE;
+    }
 }
 
 static void
 tp_gesture_handle_state_swipe(struct tp_dispatch *tp, uint64_t time)
 {
-	struct device_float_coords raw;
-	struct normalized_coords delta, unaccel;
+    struct device_float_coords raw;
+    struct normalized_coords delta, unaccel;
+    int finger_count = tp->gesture.finger_count;
 
-	raw = tp_get_average_touches_delta(tp);
-	delta = tp_filter_motion(tp, &raw, time);
+    raw = tp_get_average_touches_delta(tp);
+    delta = tp_filter_motion(tp, &raw, time);
 
-	if (!normalized_is_zero(delta) || !device_float_is_zero(raw)) {
-		int finger_count = tp->gesture.finger_count;
-		/* Report 3-finger vertical swipe as 4-finger swipe */
-		if (tp->gesture.finger_count == 3) {
-			struct phys_coords delta_mm = tp_phys_delta(tp, raw);
-			if (fabs(delta_mm.y) > fabs(delta_mm.x) * 1.73) { /* 60-degree slope for vertical */
-				finger_count = 4;
-			}
-		}
-		unaccel = tp_filter_motion_unaccelerated(tp, &raw, time);
-		gesture_notify_swipe(&tp->device->base, time,
-				     LIBINPUT_EVENT_GESTURE_SWIPE_UPDATE,
-				     finger_count,
-				     &delta, &unaccel);
-	}
+    if (!normalized_is_zero(delta) || !device_float_is_zero(raw)) {
+        /* For 4 physical fingers, log the event and do not notify */
+        if (tp->gesture.finger_count == 4) {
+            tp_log_swipe_event(tp, time, "SWIPE_UPDATE", finger_count, &delta);
+            return;
+        }
+
+        /* Handle 3-finger vertical swipes as 4-finger swipes */
+        if (tp->gesture.finger_count == 3) {
+            struct phys_coords delta_mm = tp_phys_delta(tp, raw);
+            if (fabs(delta_mm.y) > fabs(delta_mm.x) * 1.73) { /* 60-degree slope for vertical */
+                finger_count = 4;
+            }
+        }
+
+        /* Notify for non-4-finger swipes */
+        unaccel = tp_filter_motion_unaccelerated(tp, &raw, time);
+        gesture_notify_swipe(&tp->device->base, time,
+                            LIBINPUT_EVENT_GESTURE_SWIPE_UPDATE,
+                            finger_count,
+                            &delta, &unaccel);
+    }
 }
-
 static void
 tp_gesture_handle_state_pinch_start(struct tp_dispatch *tp, uint64_t time)
 {
