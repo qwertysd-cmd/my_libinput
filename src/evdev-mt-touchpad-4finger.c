@@ -23,7 +23,8 @@
 
 #include "evdev-mt-touchpad-4finger.h"
 #include "evdev-mt-touchpad.h"
-
+#include "evdev.h"
+#include <linux/input-event-codes.h> /* For KEY_VOLUMEDOWN, KEY_VOLUMEUP, etc. */
 
 /* Logging function to write swipe events to a file in /tmp */
 void
@@ -32,12 +33,31 @@ tp_deal_with_it(struct tp_dispatch *tp, uint64_t time, const char *event_type, i
     FILE *log_file;
     char *log_path = "/tmp/touchpad_swipe.log";
 
+    /* Ignore small movements to prevent accidental triggers */
+    if (fabs(delta->x) < 5 && fabs(delta->y) < 5) {
+        return;
+    }
+
     /* Determine swipe direction based on delta */
     const char *direction;
+    uint32_t keycode = 0;
     if (fabs(delta->y) > fabs(delta->x) * 1.73) { /* 60-degree slope for vertical */
         direction = delta->y > 0 ? "down" : "up";
+        if (finger_count == 4) {
+            keycode = (delta->y > 0) ? KEY_VOLUMEDOWN : KEY_VOLUMEUP;
+        }
     } else {
         direction = delta->x > 0 ? "right" : "left";
+        if (finger_count == 4) {
+            keycode = (delta->x > 0) ? KEY_BRIGHTNESSUP : KEY_BRIGHTNESSDOWN;
+        }
+    }
+
+    /* Simulate key press and release for 4-finger swipes */
+    if (keycode != 0) {
+        keycode_t key = keycode_from_uint32_t(keycode);
+        keyboard_notify_key(&tp->device->base, time, key, LIBINPUT_KEY_STATE_PRESSED);
+        keyboard_notify_key(&tp->device->base, time, key, LIBINPUT_KEY_STATE_RELEASED);
     }
 
     /* Open log file in append mode */
@@ -48,7 +68,7 @@ tp_deal_with_it(struct tp_dispatch *tp, uint64_t time, const char *event_type, i
     }
 
     /* Write human-readable log entry with deltas */
-    fprintf(log_file, "%s: %d-finger swipe %s (delta x: %.2f, y: %.2f)\n",
-            event_type, finger_count, direction, delta->x, delta->y);
+    fprintf(log_file, "%s: %d-finger swipe %s (delta x: %.2f, y: %.2f, keycode: %d)\n",
+            event_type, finger_count, direction, delta->x, delta->y, keycode);
     fclose(log_file);
 }
