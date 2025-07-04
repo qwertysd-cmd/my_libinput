@@ -450,15 +450,13 @@ tp_edge_motion_handle_drag_state(struct tp_dispatch *tp, uint64_t time) {
             break;
 
         case STATE_DRAG_EDGE_CONTINUOUS:
-            /* Continuing motion at edge - motion vector and speed will be updated dynamically in timer */
             /* No action needed here as updates happen in inject_accumulated_motion() */
             break;
     }
 
     /*
      * Return whether generated motion should be active
-     * Returns 1 (true) when in edge motion states, 0 (false) for idle or centered states
-     * FIXED: Use correct logical operator and state checks like the original working code
+     * Returns 1 when in edge motion states, 0 (false) for idle or centered states
      */
     return (fsm.current_state != STATE_DRAG_ACTIVE_CENTERED && fsm.current_state != STATE_IDLE);
 }
