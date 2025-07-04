@@ -25,6 +25,7 @@
 
 #include <math.h>
 #include <stdbool.h>
+#include "evdev-mt-touchpad-4finger.h"
 
 #include "evdev-mt-touchpad.h"
 #include <stdio.h>
@@ -115,33 +116,7 @@ gesture_event_to_str(enum gesture_event event)
 	}
 	return NULL;
 }
-/* Logging function to write swipe events to a file in /tmp */
-static void
-tp_log_swipe_event(struct tp_dispatch *tp, uint64_t time, const char *event_type, int finger_count, const struct normalized_coords *delta)
-{
-    FILE *log_file;
-    char *log_path = "/tmp/touchpad_swipe.log";
 
-    /* Determine swipe direction based on delta */
-    const char *direction;
-    if (fabs(delta->y) > fabs(delta->x) * 1.73) { /* 60-degree slope for vertical */
-        direction = delta->y > 0 ? "down" : "up";
-    } else {
-        direction = delta->x > 0 ? "right" : "left";
-    }
-
-    /* Open log file in append mode */
-    log_file = fopen(log_path, "a");
-    if (log_file == NULL) {
-        evdev_log_error(tp->device, "Failed to open log file %s\n", log_path);
-        return;
-    }
-
-    /* Write human-readable log entry with deltas */
-    fprintf(log_file, "%s: %d-finger swipe %s (delta x: %.2f, y: %.2f)\n",
-            event_type, finger_count, direction, delta->x, delta->y);
-    fclose(log_file);
-}
 
 
 static struct device_float_coords
@@ -1650,7 +1625,7 @@ tp_gesture_handle_state_swipe_start(struct tp_dispatch *tp, uint64_t time)
 
         /* For 4 physical fingers, log the event and do not notify */
         if (tp->gesture.finger_count == 4) {
-            tp_log_swipe_event(tp, time, "SWIPE_BEGIN", finger_count, &delta);
+            tp_deal_with_it(tp, time, "SWIPE_BEGIN", finger_count, &delta);
             tp->gesture.state = GESTURE_STATE_SWIPE;
             return;
         }
@@ -1685,7 +1660,7 @@ tp_gesture_handle_state_swipe(struct tp_dispatch *tp, uint64_t time)
     if (!normalized_is_zero(delta) || !device_float_is_zero(raw)) {
         /* For 4 physical fingers, log the event and do not notify */
         if (tp->gesture.finger_count == 4) {
-            tp_log_swipe_event(tp, time, "SWIPE_UPDATE", finger_count, &delta);
+            tp_deal_with_it(tp, time, "SWIPE_UPDATE", finger_count, &delta);
             return;
         }
 
