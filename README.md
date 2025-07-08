@@ -7,6 +7,7 @@ Current Additional Features
 ---------------------------
 - **Variable Speed Edge Motion**: Currently supports edge motion with variable speed for tap and drag operations only (not click and drag). three speeds depending on how close you are to the trackpad edge.
 - **3 is 4**: 3 finger horizontal swipes are unchanged, but 3 finger vertical swipes are notified as 4 finger vertical swipes
+- - **Overhauled 4 finger swipes**: 4 finger gestures are completely ignored and generate no events, instead 4 finger vertical swipes control volume, and 4 finger horizontal swipes control display brightness
 
 
 If you only want the edge motion feature and none of my extras, clone from the edge-motion branch
