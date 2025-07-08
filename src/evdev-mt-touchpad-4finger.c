@@ -94,7 +94,7 @@ static struct swipe_fsm fsm = {
     .tp = NULL,
     .timer_active = false
 };
-
+/*
 static const char *
 state_to_string(enum swipe_state state) {
     switch (state) {
@@ -118,6 +118,7 @@ direction_to_string(enum swipe_direction dir) {
         default: return "UNKNOWN";
     }
 }
+*/
 
 static enum swipe_direction
 get_primary_direction(const struct normalized_coords *delta) {
@@ -263,7 +264,7 @@ start_timer_if_needed(uint64_t time) {
         libinput_timer_set(&fsm.timer, time + SWIPE_BASE_INTERVAL_MS * 1000);
     }
 }
-
+/*
 static void
 log_swipe_event(const char *event_type, int finger_count, const struct normalized_coords *delta, uint32_t keycode) {
     FILE *log_file;
@@ -281,6 +282,7 @@ log_swipe_event(const char *event_type, int finger_count, const struct normalize
 
     fclose(log_file);
 }
+*/
 
 /* Main function called by the gesture recognition system */
 void
@@ -400,21 +402,11 @@ tp_deal_with_it(struct tp_dispatch *tp, uint64_t time, const char *event_type, i
     }
 
     /* Log the event for debugging */
+    /*
     log_swipe_event(event_type, finger_count, delta,
                    (fsm.locked_direction == SWIPE_DIR_UP) ? KEY_VOLUMEUP :
                    (fsm.locked_direction == SWIPE_DIR_DOWN) ? KEY_VOLUMEDOWN :
                    (fsm.locked_direction == SWIPE_DIR_LEFT) ? KEY_BRIGHTNESSDOWN :
-                   (fsm.locked_direction == SWIPE_DIR_RIGHT) ? KEY_BRIGHTNESSUP : 0);
+                   (fsm.locked_direction == SWIPE_DIR_RIGHT) ? KEY_BRIGHTNESSUP : 0);*/
 }
 
-/* Cleanup function */
-void
-tp_swipe_fsm_cleanup(void) {
-    if (fsm.tp) {
-        libinput_timer_cancel(&fsm.timer);
-        libinput_timer_destroy(&fsm.timer);
-    }
-
-    memset(&fsm, 0, sizeof(fsm));
-    fsm.state = SWIPE_STATE_IDLE;
-}
