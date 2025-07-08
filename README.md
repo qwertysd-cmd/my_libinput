@@ -10,7 +10,7 @@ Current Additional Features
 - **Overhauled 4 finger swipes**: 4 finger gestures are completely ignored and generate no events, instead 4 finger vertical swipes control volume, and 4 finger horizontal swipes control display brightness
 
 
-If you only want the edge motion feature and none of my extras, clone from the edge-motion branch
+If you only want the edge motion feature and none of my extras, clone from the branch "edge-motion"
 
 Building the Clone
 ------------------
