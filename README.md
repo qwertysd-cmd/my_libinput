@@ -21,8 +21,8 @@ git clone https://github.com/qwertysd-cmd/my_libinput/
 
 Why is it a clone and not a fork?
 ---------------------------------
-Because the devs made it clear that they will not implement edge motion [here](https://gitlab.freedesktop.org/libinput/libinput/-/issues/131) 
-and additionally, my future plans deviate heavily from what libinput is actually meant to do.
+Because the devs have already implemented a solution (drag lock) to the same problem, this is just an alternative. For those who prefer it the windows way
+and additionally, the additional features and my future plans deviate heavily from what libinput is actually meant to do.
 
 ---
 libinput's readme
