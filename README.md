@@ -19,11 +19,6 @@ The build instructions are identical to the upstream libinput, except you should
 git clone https://github.com/qwertysd-cmd/my_libinput/
 ```
 
-Why is it a clone and not a fork?
----------------------------------
-Because the devs have already implemented a solution (drag lock) to the same problem, this is just an alternative. For those who prefer it the windows way
-and additionally, the additional features and my future plans deviate heavily from what libinput is actually meant to do.
-
 ---
 libinput's readme
 =================
